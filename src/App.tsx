@@ -42,7 +42,6 @@ import { motion, AnimatePresence } from 'motion/react';
 import { format, subDays, startOfMonth, endOfMonth, eachDayOfInterval } from 'date-fns';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
-
 import { 
   AreaChart, 
   Area, 
@@ -61,6 +60,82 @@ function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
+const OCR_TARGET_BYTES = 900 * 1024;
+
+function estimateBase64Bytes(base64: string): number {
+  const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
+  return Math.floor((base64.length * 3) / 4) - padding;
+}
+
+function readBlobAsDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve((reader.result as string) || '');
+    reader.onerror = () => reject(new Error('Failed to read file'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function loadImageFromDataUrl(dataUrl: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('Failed to decode image'));
+    img.src = dataUrl;
+  });
+}
+
+async function prepareImagePayloadForOCR(file: File): Promise<{ base64: string; mimeType: string }> {
+  const originalDataUrl = await readBlobAsDataUrl(file);
+  const originalBase64 = originalDataUrl.split(',')[1] || '';
+
+  if (estimateBase64Bytes(originalBase64) <= OCR_TARGET_BYTES) {
+    return {
+      base64: originalBase64,
+      mimeType: file.type || 'image/jpeg',
+    };
+  }
+
+  const image = await loadImageFromDataUrl(originalDataUrl);
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    throw new Error('Could not prepare image for OCR');
+  }
+
+  let width = image.naturalWidth;
+  let height = image.naturalHeight;
+  const qualities = [0.88, 0.8, 0.72, 0.64, 0.56, 0.48, 0.4];
+
+  for (let i = 0; i < 6; i++) {
+    canvas.width = Math.max(480, Math.floor(width));
+    canvas.height = Math.max(480, Math.floor(height));
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+    for (const quality of qualities) {
+      const compressedDataUrl = canvas.toDataURL('image/jpeg', quality);
+      const compressedBase64 = compressedDataUrl.split(',')[1] || '';
+      if (estimateBase64Bytes(compressedBase64) <= OCR_TARGET_BYTES) {
+        return {
+          base64: compressedBase64,
+          mimeType: 'image/jpeg',
+        };
+      }
+    }
+
+    width = Math.floor(width * 0.85);
+    height = Math.floor(height * 0.85);
+  }
+
+  const fallbackDataUrl = canvas.toDataURL('image/jpeg', 0.35);
+  return {
+    base64: fallbackDataUrl.split(',')[1] || '',
+    mimeType: 'image/jpeg',
+  };
+}
+
 // --- Types ---
 type Role = 'Admin' | 'Manager' | 'Employee' | 'Finance' | 'HR' | 'Director' | 'CFO';
 
@@ -74,7 +149,6 @@ interface User {
   companyId: string;
   department?: string;
   ruleId?: string;
-  password?: string;
 }
 
 interface Company {
@@ -138,14 +212,10 @@ const MOCK_COMPANY: Company = {
 
 const MOCK_USERS: User[] = [
   { id: 'u-1', name: 'Alice Admin', email: 'alice@acme.com', role: 'Admin', companyId: 'comp-1' },
-  { id: 'u-2', name: 'Bob Manager', email: 'bob@acme.com', role: 'Manager', companyId: 'comp-1' },
+  { id: 'u-2', name: 'Bob Manager', email: 'bob@acme.com', role: 'Manager', directorId: 'u-5', companyId: 'comp-1' },
   { id: 'u-3', name: 'Charlie Employee', email: 'charlie@acme.com', role: 'Employee', managerId: 'u-2', companyId: 'comp-1', department: 'Engineering' },
   { id: 'u-4', name: 'Diana Finance', email: 'diana@acme.com', role: 'Finance', companyId: 'comp-1' },
-  { id: 'u-5', name: 'Frank Manager', email: 'manager1@acme.com', role: 'Manager', companyId: 'comp-1', department: 'Operations' },
-  { id: 'u-6', name: 'Grace Manager', email: 'manager2@acme.com', role: 'Manager', companyId: 'comp-1', department: 'Product' },
-  { id: 'u-7', name: 'Henry Employee', email: 'emp1@acme.com', role: 'Employee', managerId: 'u-5', companyId: 'comp-1', department: 'Engineering' },
-  { id: 'u-8', name: 'Ivy Employee', email: 'emp2@acme.com', role: 'Employee', managerId: 'u-5', companyId: 'comp-1', department: 'Sales' },
-  { id: 'u-9', name: 'Jack Employee', email: 'emp3@acme.com', role: 'Employee', managerId: 'u-6', companyId: 'comp-1', department: 'Support' },
+  { id: 'u-5', name: 'Edward Director', email: 'edward@acme.com', role: 'Director', companyId: 'comp-1' },
 ];
 
 const MOCK_EXPENSES: Expense[] = [
@@ -591,8 +661,6 @@ const Card = ({ children, className, ...props }: { children: React.ReactNode, cl
 
 // --- Main App ---
 
-
-
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [company, setCompany] = useState<Company | null>(null);
@@ -736,39 +804,13 @@ export default function App() {
     }
   }, [view, user]);
 
-  // Mock Login (Role based simulation)
+  // Mock Login
   const handleLogin = (role: Role) => {
+    // In a real app, this would be an API call
     const mockUser = MOCK_USERS.find(u => u.role === role) || MOCK_USERS[2];
     setUser(mockUser);
     setView('Dashboard');
     setActiveTab('Overview');
-  };
-
-  const handleRealLogin = async (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    const formData = new FormData(e.currentTarget);
-    const { email, password } = Object.fromEntries(formData.entries());
-    
-    setIsLoading(true);
-    try {
-      const res = await fetch('/api/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
-      });
-      if (res.ok) {
-        const userData = await res.json();
-        setUser(userData);
-        setView('Dashboard');
-        setActiveTab('Overview');
-      } else {
-        alert("Invalid email or password");
-      }
-    } catch (error) {
-      console.error("Login failed:", error);
-    } finally {
-      setIsLoading(false);
-    }
   };
 
   const handleLogout = () => {
@@ -854,42 +896,45 @@ export default function App() {
   const handleOCR = async (file: File) => {
     setIsScanning(true);
     try {
-      const base64Data = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => {
-          const base64 = reader.result as string;
-          resolve(base64.split(",")[1]);
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
+      if (file.size > MAX_UPLOAD_BYTES) {
+        throw new Error('File is too large. Please upload a receipt smaller than 15MB.');
+      }
 
-      const response = await fetch('/api/ocr', {
+      const isImage = file.type.startsWith('image/');
+      const payload = isImage
+        ? await prepareImagePayloadForOCR(file)
+        : {
+            base64: (await readBlobAsDataUrl(file)).split(',')[1] || '',
+            mimeType: file.type || 'application/octet-stream',
+          };
+
+      const res = await fetch('/api/ocr', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          base64Image: base64Data,
-          mimeType: file.type,
-          fileName: file.name
-        })
+          fileName: file.name,
+          mimeType: payload.mimeType,
+          base64Image: payload.base64,
+        }),
       });
 
-      if (!response.ok) {
-        throw new Error(`OCR request failed: ${response.statusText}`);
+      const contentType = res.headers.get('content-type') || '';
+      const data = contentType.includes('application/json') ? await res.json() : { error: await res.text() };
+      if (!res.ok) {
+        throw new Error(data?.error || 'Failed to process receipt');
       }
 
-      const data = await response.json();
       setSubmitForm(prev => ({
         ...prev,
-        amount: data.amount?.toString() || prev.amount,
-        currency: data.currency || prev.currency,
+        amount: data.amount ? data.amount.toString() : prev.amount,
         category: data.category || prev.category,
         date: data.date || prev.date,
-        description: data.description || prev.description
+        description: data.description || prev.description,
       }));
-    } catch (error: any) {
+    } catch (error) {
       console.error("OCR failed:", error);
-      alert(`OCR Failed: ${error.message || "Unknown error"}. Please make sure your server is running and your image is within size limits (free tier is usually < 1MB).`);
+      const message = error instanceof Error ? error.message : 'Could not extract receipt details. Please fill the form manually.';
+      alert(message);
     } finally {
       setIsScanning(false);
     }
@@ -975,66 +1020,24 @@ export default function App() {
           </div>
 
           <Card className="p-8">
-            <h2 className="text-xl font-semibold mb-6 text-center">Login to your Account</h2>
-            
-            <form onSubmit={handleRealLogin} className="space-y-4">
-              <div className="space-y-2">
-                <label className="text-sm font-bold text-slate-700">Email Address</label>
-                <div className="relative">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
-                  <input 
-                    name="email"
-                    type="email" 
-                    placeholder="name@company.com" 
-                    className="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-200 focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600 transition-all outline-none"
-                    required
-                  />
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                <label className="text-sm font-bold text-slate-700">Password</label>
-                <div className="relative">
-                  <ShieldCheck className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
-                  <input 
-                    name="password"
-                    type="password" 
-                    placeholder="••••••••" 
-                    className="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-200 focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600 transition-all outline-none"
-                    required
-                  />
-                </div>
-              </div>
-
-              <button 
-                type="submit"
-                disabled={isLoading}
-                className="w-full py-3 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 disabled:opacity-50"
-              >
-                {isLoading ? 'Signing in...' : 'Sign In'}
-              </button>
-            </form>
-
-            <div className="relative my-8">
-              <div className="absolute inset-0 flex items-center">
-                <div className="w-full border-t border-slate-100"></div>
-              </div>
-              <div className="relative flex justify-center text-xs uppercase">
-                <span className="bg-white px-2 text-slate-500 font-bold">Or Simulation Login</span>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-3 gap-3">
+            <h2 className="text-xl font-semibold mb-6 text-center">Select Prototype Role</h2>
+            <div className="space-y-3">
               {(['Admin', 'Manager', 'Employee'] as Role[]).map((role) => (
                 <button
                   key={role}
                   onClick={() => handleLogin(role)}
-                  className="flex flex-col items-center gap-2 p-3 rounded-xl border border-slate-100 hover:border-indigo-600 hover:bg-indigo-50 transition-all group"
+                  className="w-full flex items-center justify-between p-4 rounded-xl border border-slate-200 hover:border-indigo-600 hover:bg-indigo-50 transition-all group"
                 >
-                  <div className="w-10 h-10 rounded-full bg-slate-50 flex items-center justify-center group-hover:bg-indigo-100 text-slate-500 group-hover:text-indigo-600 transition-colors">
-                    {role === 'Admin' ? <Settings size={18} /> : role === 'Manager' ? <Users size={18} /> : <FileText size={18} />}
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center group-hover:bg-indigo-100">
+                      {role === 'Admin' ? <Settings size={20} /> : role === 'Manager' ? <Users size={20} /> : <FileText size={20} />}
+                    </div>
+                    <div className="text-left">
+                      <p className="font-semibold text-slate-900">{role}</p>
+                      <p className="text-xs text-slate-500">Access {role.toLowerCase()} features</p>
+                    </div>
                   </div>
-                  <span className="text-[10px] font-bold text-slate-600 group-hover:text-indigo-600">{role}</span>
+                  <ChevronRight className="text-slate-400 group-hover:text-indigo-600" size={20} />
                 </button>
               ))}
             </div>
@@ -1338,15 +1341,16 @@ export default function App() {
                     </div>
                   </div>
                 ) : (
-                  /* Manager/Admin Dashboard: Horizontal Stats -> Graph -> My Expenses -> Role-specific sections */
-                  <div className="space-y-8">
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  /* Manager/Admin Dashboard: Vertical Stats -> My Expenses -> My Team (if Manager) */
+                  <div className="grid grid-cols-1 xl:grid-cols-12 gap-8">
+                    <div className="xl:col-span-4 space-y-6">
+                      <h3 className="text-lg font-bold text-slate-900">Dashboard Summary</h3>
                       <Card className="p-6 bg-indigo-600 text-white border-none shadow-indigo-200 shadow-xl">
                         <p className="text-indigo-100 text-sm font-medium">Total Spent</p>
                         <h3 className="text-3xl font-bold mt-1">{company?.defaultCurrency} {stats.totalSpent?.toLocaleString() || '0'}</h3>
                         <p className="text-xs text-indigo-100 mt-2">Across {stats.totalCount} claims</p>
                       </Card>
-                      <Card className="p-6 border-l-4 border-l-amber-500">
+                      <Card className="p-5 border-l-4 border-l-amber-500">
                         <div className="flex items-center gap-4">
                           <div className="p-3 rounded-xl bg-amber-50 text-amber-600">
                             <Clock size={24} />
@@ -1357,7 +1361,7 @@ export default function App() {
                           </div>
                         </div>
                       </Card>
-                      <Card className="p-6 border-l-4 border-l-rose-500">
+                      <Card className="p-5 border-l-4 border-l-rose-500">
                         <div className="flex items-center gap-4">
                           <div className="p-3 rounded-xl bg-rose-50 text-rose-600">
                             <XCircle size={24} />
@@ -1368,99 +1372,96 @@ export default function App() {
                           </div>
                         </div>
                       </Card>
-                    </div>
-
-                    <Card className="p-6">
-                      <h3 className="text-lg font-bold text-slate-900 mb-4">Spending Trends</h3>
-                      <DashboardGraph data={expenses} />
-                    </Card>
-
-                    <div className="space-y-6">
-                      <div className="flex items-center justify-between">
-                        <h3 className="text-lg font-bold text-slate-900">My Expenses</h3>
-                        <button onClick={() => setActiveTab('Expenses')} className="text-sm text-indigo-600 font-semibold hover:underline">View All</button>
-                      </div>
-                      <Card className="p-0">
-                        <div className="divide-y divide-slate-100">
-                          {expenses.length > 0 ? expenses.slice(0, 8).map((exp) => (
-                            <div key={exp.id} className="flex items-center justify-between p-4 hover:bg-slate-50 transition-colors">
-                              <div className="flex items-center gap-4">
-                                <div className="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center text-slate-600">
-                                  <Receipt size={20} />
+                      
+                      {user?.role === 'Admin' && (
+                        <Card className="p-6">
+                          <h3 className="font-bold text-lg mb-6">Approval Rules</h3>
+                          <div className="space-y-6">
+                            {rules?.[0]?.steps?.map((step, i) => (
+                              <div key={i} className="relative pl-8 pb-6 last:pb-0">
+                                {i !== (rules[0].steps.length - 1) && (
+                                  <div className="absolute left-[11px] top-6 bottom-0 w-0.5 bg-slate-100" />
+                                )}
+                                <div className="absolute left-0 top-1 w-6 h-6 rounded-full bg-indigo-600 text-white flex items-center justify-center text-xs font-bold">
+                                  {i + 1}
                                 </div>
                                 <div>
-                                  <p className="font-bold text-slate-900 text-sm">{exp.description}</p>
-                                  <p className="text-xs text-slate-500">{exp.category} • {exp.date}</p>
+                                  <p className="font-bold text-slate-900">{step.role}</p>
+                                  <p className="text-xs text-slate-500 mt-1">
+                                    {step.isManagerApprover ? "Direct Manager" : "Departmental Head"}
+                                  </p>
                                 </div>
                               </div>
-                              <div className="text-right">
-                                <p className="font-bold text-slate-900 text-sm">{exp.currency} {(exp.amount || 0).toFixed(2)}</p>
-                                <Badge status={exp.status} />
-                              </div>
-                            </div>
-                          )) : (
-                            <div className="p-12 text-center">
-                              <Receipt className="text-slate-300 mx-auto mb-4" size={48} />
-                              <p className="text-slate-500 font-medium">No expenses found</p>
-                            </div>
-                          )}
-                        </div>
-                      </Card>
+                            ))}
+                            {(!rules || rules.length === 0 || !rules[0].steps) && (
+                              <p className="text-sm text-slate-500 italic">No approval rules configured.</p>
+                            )}
+                          </div>
+                        </Card>
+                      )}
                     </div>
 
-                    {user?.role === 'Manager' && team.length > 0 && (
+                    <div className="xl:col-span-8 space-y-8">
                       <div className="space-y-6">
-                        <h3 className="text-lg font-bold text-slate-900">My Team</h3>
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                          {team.slice(0, 6).map(member => (
-                            <Card key={member.id} className="p-4 flex items-center gap-4 hover:border-indigo-300 transition-all cursor-pointer" onClick={() => {
-                              setSelectedUser(member);
-                              setActiveTab('Users');
-                              fetchUserDetails(member.id);
-                            }}>
-                              <div className="w-12 h-12 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-700 font-bold">
-                                {member.name.charAt(0)}
-                              </div>
-                              <div className="flex-1 min-w-0">
-                                <p className="font-bold text-slate-900 truncate">{member.name}</p>
-                                <p className="text-xs text-slate-500 truncate">{member.department || 'No Department'}</p>
-                              </div>
-                              <ChevronRight size={18} className="text-slate-300" />
-                            </Card>
-                          ))}
+                        <div className="flex items-center justify-between">
+                          <h3 className="text-lg font-bold text-slate-900">My Expenses</h3>
+                          <button onClick={() => setActiveTab('Expenses')} className="text-sm text-indigo-600 font-semibold hover:underline">View All</button>
                         </div>
-                        {team.length > 6 && (
-                          <button onClick={() => setActiveTab('Users')} className="text-indigo-600 font-bold text-sm hover:underline">View all {team.length} members</button>
-                        )}
+                        <Card className="p-0">
+                          <div className="divide-y divide-slate-100">
+                            {expenses.length > 0 ? expenses.slice(0, 5).map((exp) => (
+                              <div key={exp.id} className="flex items-center justify-between p-4 hover:bg-slate-50 transition-colors">
+                                <div className="flex items-center gap-4">
+                                  <div className="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center text-slate-600">
+                                    <Receipt size={20} />
+                                  </div>
+                                  <div>
+                                    <p className="font-bold text-slate-900 text-sm">{exp.description}</p>
+                                    <p className="text-xs text-slate-500">{exp.category} • {exp.date}</p>
+                                  </div>
+                                </div>
+                                <div className="text-right">
+                                  <p className="font-bold text-slate-900 text-sm">{exp.currency} {(exp.amount || 0).toFixed(2)}</p>
+                                  <Badge status={exp.status} />
+                                </div>
+                              </div>
+                            )) : (
+                              <div className="p-12 text-center">
+                                <Receipt className="text-slate-300 mx-auto mb-4" size={48} />
+                                <p className="text-slate-500 font-medium">No expenses found</p>
+                              </div>
+                            )}
+                          </div>
+                        </Card>
                       </div>
-                    )}
 
-                    {user?.role === 'Admin' && (
-                      <Card className="p-6">
-                        <h3 className="font-bold text-lg mb-6">Approval Rules</h3>
+                      {user?.role === 'Manager' && team.length > 0 && (
                         <div className="space-y-6">
-                          {rules?.[0]?.steps?.map((step, i) => (
-                            <div key={i} className="relative pl-8 pb-6 last:pb-0">
-                              {i !== (rules[0].steps.length - 1) && (
-                                <div className="absolute left-[11px] top-6 bottom-0 w-0.5 bg-slate-100" />
-                              )}
-                              <div className="absolute left-0 top-1 w-6 h-6 rounded-full bg-indigo-600 text-white flex items-center justify-center text-xs font-bold">
-                                {i + 1}
-                              </div>
-                              <div>
-                                <p className="font-bold text-slate-900">{step.role}</p>
-                                <p className="text-xs text-slate-500 mt-1">
-                                  {step.isManagerApprover ? "Direct Manager" : "Departmental Head"}
-                                </p>
-                              </div>
-                            </div>
-                          ))}
-                          {(!rules || rules.length === 0 || !rules[0].steps) && (
-                            <p className="text-sm text-slate-500 italic">No approval rules configured.</p>
+                          <h3 className="text-lg font-bold text-slate-900">My Team</h3>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            {team.slice(0, 6).map(member => (
+                              <Card key={member.id} className="p-4 flex items-center gap-4 hover:border-indigo-300 transition-all cursor-pointer" onClick={() => {
+                                setSelectedUser(member);
+                                setActiveTab('Users');
+                                fetchUserDetails(member.id);
+                              }}>
+                                <div className="w-12 h-12 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-700 font-bold">
+                                  {member.name.charAt(0)}
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                  <p className="font-bold text-slate-900 truncate">{member.name}</p>
+                                  <p className="text-xs text-slate-500 truncate">{member.department || 'No Department'}</p>
+                                </div>
+                                <ChevronRight size={18} className="text-slate-300" />
+                              </Card>
+                            ))}
+                          </div>
+                          {team.length > 6 && (
+                            <button onClick={() => setActiveTab('Users')} className="text-indigo-600 font-bold text-sm hover:underline">View all {team.length} members</button>
                           )}
                         </div>
-                      </Card>
-                    )}
+                      )}
+                    </div>
                   </div>
                 )}
               </motion.div>
@@ -2301,7 +2302,7 @@ export default function App() {
                           <input 
                             type="file" 
                             className="absolute inset-0 opacity-0 cursor-pointer" 
-                            accept="image/*"
+                            accept="image/*,application/pdf"
                             onChange={(e) => {
                               const file = e.target.files?.[0];
                               if (file) handleOCR(file);
@@ -2311,16 +2312,16 @@ export default function App() {
                             <Upload size={24} />
                           </div>
                           <p className="text-sm font-bold text-slate-900">Click to upload or drag and drop</p>
-                          <p className="text-xs text-slate-500 mt-1">PNG, JPG or PDF (max. 5MB)</p>
+                          <p className="text-xs text-slate-500 mt-1">PNG, JPG, WEBP or PDF (max. 15MB; large images auto-optimized)</p>
                         </label>
                       </div>
                       <div className="p-4 bg-indigo-50 rounded-xl border border-indigo-100">
                         <div className="flex items-center gap-3 text-indigo-700 mb-2">
                           <Scan size={18} />
-                          <span className="font-bold text-sm">OCR Smart Scan</span>
+                          <span className="font-bold text-sm">AI Smart Scan</span>
                         </div>
                         <p className="text-xs text-indigo-600 leading-relaxed">
-                          Upload a receipt and our OCR system will automatically extract the amount, date, and merchant for you.
+                          Upload a receipt and our AI will automatically extract the amount, date, and category for you.
                         </p>
                       </div>
                       {isScanning && (
@@ -2335,7 +2336,7 @@ export default function App() {
                           >
                             <Clock size={18} />
                           </motion.div>
-                          <span className="font-bold text-sm">OCR Space is analyzing your receipt...</span>
+                          <span className="font-bold text-sm">OCR.Space is analyzing your receipt...</span>
                         </motion.div>
                       )}
                     </div>
