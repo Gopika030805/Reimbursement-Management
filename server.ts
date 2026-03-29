@@ -4,6 +4,8 @@ import path from "path";
 import { fileURLToPath } from "url";
 import mysql from "mysql2/promise";
 import cors from "cors";
+import { google } from "googleapis";
+import fs from "fs/promises";
 
 const OCRSPACE_API_KEY = process.env.OCRSPACE_API_KEY || "K88920221588957";
 
@@ -145,6 +147,76 @@ function mapExpense(e: any) {
   };
 }
 
+async function sendEmailViaGmail(to: string, subject: string, body: string) {
+  try {
+    const creds = JSON.parse(await fs.readFile("token.json", "utf-8"));
+    
+    const credentials = {
+      access_token: creds.token || creds.access_token,
+      refresh_token: creds.refresh_token,
+      scope: creds.scopes ? creds.scopes.join(" ") : "",
+      token_type: "Bearer",
+      expiry_date: creds.expiry_date || (creds.expiry ? new Date(creds.expiry).getTime() : Date.now())
+    };
+
+    const oAuth2Client = new google.auth.OAuth2(
+      creds.client_id,
+      creds.client_secret
+    );
+    oAuth2Client.setCredentials(credentials);
+
+    // Force token refresh if needed
+    oAuth2Client.on('tokens', (tokens) => {
+      if (tokens.refresh_token) {
+        // Update local memory if needed
+      }
+    });
+
+    const gmail = google.gmail({ version: "v1", auth: oAuth2Client });
+    
+    // Professional HTML email template
+    const htmlBody = `
+      <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; color: #334155; border: 1px solid #f1f5f9; border-radius: 16px; overflow: hidden;">
+        <div style="background-color: #4f46e5; padding: 32px; text-align: center;">
+          <h1 style="color: white; margin: 0; font-size: 24px;">ExpenseFlow</h1>
+          <p style="color: #c7d2fe; margin-top: 8px;">Smart Expense Management</p>
+        </div>
+        <div style="padding: 40px;">
+          ${body}
+          <div style="margin-top: 40px; padding-top: 24px; border-t: 1px solid #f1f5f9; font-size: 12px; color: #94a3b8; text-align: center;">
+            &copy; 2026 ExpenseFlow. All rights reserved.
+          </div>
+        </div>
+      </div>
+    `;
+
+    const raw = Buffer.from(
+      `To: ${to}\r\n` +
+      `Subject: ${subject}\r\n` +
+      `Content-Type: text/html; charset=utf-8\r\n\r\n` +
+      `${htmlBody}`
+    ).toString("base64").replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+    await gmail.users.messages.send({
+      userId: "me",
+      requestBody: { raw },
+    });
+    console.log(`Email sent successfully to ${to}`);
+  } catch (error: any) {
+    console.error("GMAIL API ERROR:", error.message || error);
+    throw error; // Propagate the error so the API can handle it
+  }
+}
+
+function generatePassword() {
+  const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  let pass = "";
+  for (let i = 0; i < 10; i++) {
+    pass += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return pass;
+}
+
 function mapCompany(c: any) {
   if (!c) return c;
   return {
@@ -206,10 +278,28 @@ async function startServer() {
         [companyId, companyName, defaultCurrency, country]
       );
 
+      const password = generatePassword();
       await pool.execute(
-        "INSERT INTO users (id, name, email, role, company_id, department) VALUES (?, ?, ?, ?, ?, ?)",
-        [adminId, adminName, adminEmail, "Admin", companyId, "Administration"]
+        "INSERT INTO users (id, name, email, role, company_id, department, password) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [adminId, adminName, adminEmail, "Admin", companyId, "Administration", password]
       );
+
+      // Send email to admin in background - DO NOT AWAIT to avoid UI blocking
+      sendEmailViaGmail(
+        adminEmail,
+        "Welcome to ExpenseFlow - Your Organization is Ready!",
+        `<h3>Hello ${adminName},</h3>
+        <p>Your organization <b>${companyName}</b> has been successfully initialized on ExpenseFlow.</p>
+        <p>You can now manage reimbursements, set approval rules, and onboard your team.</p>
+        <hr style="margin: 24px 0; border: none; border-top: 1px solid #f1f5f9;">
+        <p><b>Login Details:</b></p>
+        <p><b>URL:</b> http://localhost:5173</p>
+        <p><b>Email:</b> ${adminEmail}</p>
+        <p><b>Generated Password:</b> <span style="font-family: monospace; background: #f1f5f9; padding: 2px 6px; border-radius: 4px;">${password}</span></p>
+        <br>
+        <p>Please log in and change your password for security.</p>
+        <p>Best regards,<br>The ExpenseFlow Team</p>`
+      ).catch(err => console.error("Background email failed for Admin:", err));
 
       // Default rules
       const ruleId = `r-${Date.now()}`;
@@ -271,19 +361,37 @@ async function startServer() {
   app.post("/api/users", async (req, res) => {
     const { name, email, role, managerId, companyId, department } = req.body;
     const id = `u-${Date.now()}`;
+    const password = generatePassword();
     try {
       await pool.execute(
-        "INSERT INTO users (id, name, email, role, manager_id, company_id, department) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        [id, name, email, role, managerId || null, companyId, department]
+        "INSERT INTO users (id, name, email, role, manager_id, company_id, department, password) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [id, name, email, role, managerId || null, companyId, department, password]
       );
+      
+      // Send email to user in background
+      sendEmailViaGmail(
+        email,
+        "Welcome to ExpenseFlow!",
+        `<h3>Hello ${name},</h3>
+        <p>An account has been created for you on ExpenseFlow by your organization.</p>
+        <p>You can now submit and track your reimbursement claims easily.</p>
+        <hr style="margin: 24px 0; border: none; border-top: 1px solid #f1f5f9;">
+        <p><b>Your Credentials:</b></p>
+        <p><b>URL:</b> http://localhost:5173</p>
+        <p><b>Username:</b> ${email}</p>
+        <p><b>Password:</b> <span style="font-family: monospace; background: #f1f5f9; padding: 2px 6px; border-radius: 4px;">${password}</span></p>
+        <br>
+        <p>Best regards,<br>The ExpenseFlow Team</p>`
+      ).catch(err => console.error("Background email failed for User:", err));
+
       res.json({ id, name, email, role, managerId, companyId, department });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
     }
   });
-
   app.get("/api/users", async (req, res) => {
     const { companyId, managerId } = req.query;
+    console.log(`[DEBUG] GET /api/users: company=${companyId}, manager=${managerId}`);
     try {
       let users: any[];
       if (companyId) {
@@ -291,16 +399,20 @@ async function startServer() {
       } else if (managerId) {
         [users] = await pool.execute("SELECT * FROM users WHERE manager_id = ?", [managerId]) as any[];
       } else {
-        [users] = await pool.execute("SELECT * FROM users") as any[];
+        // No filter = No data (for safety)
+        console.warn("[DEBUG] GET /api/users: No filter provided, returning EMPTY.");
+        users = [];
       }
       res.json(users.map(mapUser));
     } catch (e: any) {
+      console.error(`[DEBUG] GET /api/users Error: ${e.message}`);
       res.status(500).json({ error: e.message });
     }
   });
 
   app.get("/api/expenses", async (req, res) => {
-    const { employeeId, managerId } = req.query;
+    const { employeeId, managerId, companyId } = req.query;
+    console.log(`[GET /api/expenses] Filter: emp=${employeeId}, mgr=${managerId}, company=${companyId}`);
     try {
       let expenses: any[];
       if (employeeId) {
@@ -313,27 +425,66 @@ async function startServer() {
           "SELECT e.*, u.name as employeeName FROM expenses e JOIN users u ON e.employee_id = u.id WHERE u.manager_id = ?",
           [managerId]
         ) as any[];
-      } else {
+      } else if (companyId) {
         [expenses] = await pool.execute(
-          "SELECT e.*, u.name as employeeName FROM expenses e JOIN users u ON e.employee_id = u.id"
+          "SELECT e.*, u.name as employeeName FROM expenses e JOIN users u ON e.employee_id = u.id WHERE u.company_id = ?",
+          [companyId]
         ) as any[];
+      } else {
+        // ABSOLUTELY NO FALLBACK - Return empty if no identity context
+        console.warn("[DEBUG] GET /api/expenses: No filter provided, returning EMPTY.");
+        expenses = [];
       }
+      console.log(`[GET /api/expenses] Status: OK, Rows: ${expenses.length}`);
       res.json(expenses.map(mapExpense));
     } catch (e: any) {
+      console.error(`[GET /api/expenses] Error: ${e.message}`);
       res.status(500).json({ error: e.message });
     }
   });
 
   app.post("/api/expenses", async (req, res) => {
-    const { employeeId, amount, currency, baseAmount, category, description, date } = req.body;
+    const { employeeId, amount, currency, category, description, date } = req.body;
     const id = `e-${Date.now()}`;
+    
     try {
+      // 1. Get Company's Default Currency
+      const [users] = await pool.execute("SELECT company_id FROM users WHERE id = ?", [employeeId]) as any[];
+      if (!users || !users.length) throw new Error("User not found");
+      const companyId = users[0].company_id;
+      
+      const [companies] = await pool.execute("SELECT default_currency FROM companies WHERE id = ?", [companyId]) as any[];
+      if (!companies || !companies.length) throw new Error("Company not found");
+      const baseCurrency = companies[0].default_currency;
+      
+      // 2. Automated Currency Conversion
+      let baseAmount = amount;
+      if (currency !== baseCurrency) {
+        console.log(`[CONVERSION] Converting ${amount} ${currency} to ${baseCurrency}`);
+        try {
+          const rateRes = await fetch(`https://api.exchangerate-api.com/v4/latest/${currency}`);
+          if (rateRes.ok) {
+            const data = await rateRes.json() as any;
+            const rates = data.rates;
+            const rate = rates[baseCurrency];
+            if (rate) {
+              baseAmount = amount * rate;
+              console.log(`[CONVERSION] Applied rate ${rate}: Result ${baseAmount} ${baseCurrency}`);
+            }
+          }
+        } catch (convErr) {
+          console.error("Conversion API failed, using raw amount:", convErr);
+        }
+      }
+
       await pool.execute(
         "INSERT INTO expenses (id, employee_id, amount, currency, base_amount, category, description, date, status, current_step) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Pending', 0)",
         [id, employeeId, amount, currency, baseAmount, category, description, date]
       );
-      res.json({ id, status: 'Pending' });
+      
+      res.json({ id, status: 'Pending', baseAmount });
     } catch (e: any) {
+      console.error(`[POST /api/expenses] Error: ${e.message}`);
       res.status(500).json({ error: e.message });
     }
   });
@@ -420,11 +571,14 @@ async function startServer() {
       if (action === 'reject') {
         await pool.execute("UPDATE expenses SET status = 'Rejected' WHERE id = ?", [expenseId]);
       } else {
-        const [expenses] = await pool.execute("SELECT * FROM expenses WHERE id = ?", [expenseId]) as any[];
+        const [expenses] = await pool.execute(
+          "SELECT e.*, u.company_id FROM expenses e JOIN users u ON e.employee_id = u.id WHERE e.id = ?",
+          [expenseId]
+        ) as any[];
         const expense = expenses[0];
-        const [rules] = await pool.execute("SELECT * FROM approval_rules WHERE company_id = ?", ['comp-1']) as any[];
+        const [rules] = await pool.execute("SELECT * FROM approval_rules WHERE company_id = ?", [expense.company_id]) as any[];
         const rule = rules[0];
-        const steps = typeof rule.steps_json === 'string' ? JSON.parse(rule.steps_json).steps : rule.steps_json.steps;
+        const steps = typeof rule.steps_json === 'string' ? JSON.parse(rule.steps_json).steps : (rule.steps_json.steps || rule.steps_json);
         
         if (expense.current_step >= steps.length - 1) {
           await pool.execute("UPDATE expenses SET status = 'Approved' WHERE id = ?", [expenseId]);

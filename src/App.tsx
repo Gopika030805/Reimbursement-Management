@@ -202,87 +202,7 @@ interface ApprovalRule {
   isManagerApproverAtStart: boolean;
 }
 
-// --- Mock Data ---
-const MOCK_COMPANY: Company = {
-  id: 'comp-1',
-  name: 'Acme Corp',
-  defaultCurrency: 'USD',
-  country: 'United States',
-};
-
-const MOCK_USERS: User[] = [
-  { id: 'u-1', name: 'Alice Admin', email: 'alice@acme.com', role: 'Admin', companyId: 'comp-1' },
-  { id: 'u-2', name: 'Bob Manager', email: 'bob@acme.com', role: 'Manager', directorId: 'u-5', companyId: 'comp-1' },
-  { id: 'u-3', name: 'Charlie Employee', email: 'charlie@acme.com', role: 'Employee', managerId: 'u-2', companyId: 'comp-1', department: 'Engineering' },
-  { id: 'u-4', name: 'Diana Finance', email: 'diana@acme.com', role: 'Finance', companyId: 'comp-1' },
-  { id: 'u-5', name: 'Edward Director', email: 'edward@acme.com', role: 'Director', companyId: 'comp-1' },
-];
-
-const MOCK_EXPENSES: Expense[] = [
-  {
-    id: 'e-1',
-    employeeId: 'u-3',
-    employeeName: 'Charlie Employee',
-    amount: 150.50,
-    currency: 'EUR',
-    baseAmount: 165.55,
-    category: 'Travel',
-    description: 'Taxi to airport',
-    date: '2026-03-25',
-    status: 'Pending',
-    currentStep: 0,
-    approvals: [
-      { role: 'Manager', status: 'Pending' },
-      { role: 'Finance', status: 'Pending' },
-    ],
-  },
-  {
-    id: 'e-2',
-    employeeId: 'u-3',
-    employeeName: 'Charlie Employee',
-    amount: 45.00,
-    currency: 'USD',
-    baseAmount: 45.00,
-    category: 'Meals',
-    description: 'Client lunch',
-    date: '2026-03-24',
-    status: 'Approved',
-    currentStep: 2,
-    approvals: [
-      { role: 'Manager', status: 'Approved', approverName: 'Bob Manager', date: '2026-03-24' },
-      { role: 'Finance', status: 'Approved', approverName: 'Diana Finance', date: '2026-03-25' },
-    ],
-  },
-];
-
-const MOCK_RULES: ApprovalRule[] = [
-  {
-    id: 'r-1',
-    name: 'Standard Workflow',
-    description: 'Manager -> Finance',
-    companyId: 'comp-1',
-    flowType: 'Sequential',
-    isManagerApproverAtStart: true,
-    steps: [
-      { role: 'Manager', isManagerApprover: true, isRequired: true },
-      { role: 'Finance', isManagerApprover: false, isRequired: true, percentageRequired: 100 },
-    ],
-  },
-  {
-    id: 'r-2',
-    name: 'High Value Rule',
-    description: 'Requires 60% approval or CFO override',
-    companyId: 'comp-1',
-    flowType: 'Hybrid',
-    isManagerApproverAtStart: false,
-    globalPercentageRequired: 60,
-    globalSpecificApproverId: 'CFO',
-    steps: [
-      { role: 'Finance', isManagerApprover: false, isRequired: true },
-      { role: 'CFO', isManagerApprover: false, isRequired: true }
-    ]
-  }
-];
+// --- Mock Data Removed ---
 
 // --- Components ---
 
@@ -678,6 +598,9 @@ export default function App() {
   const [stats, setStats] = useState<{ totalSpent: number, totalPending: number, totalRejected: number, totalCount: number }>({
     totalSpent: 0, totalPending: 0, totalRejected: 0, totalCount: 0
   });
+  const [countries, setCountries] = useState<{name: string, currency: string}[]>([]);
+  const [selectedCountry, setSelectedCountry] = useState('');
+  const [selectedCurrency, setSelectedCurrency] = useState('');
   const [selectedUser, setSelectedUser] = useState<User | null>(null);
   const [selectedUserExpenses, setSelectedUserExpenses] = useState<Expense[]>([]);
   const [selectedUserStats, setSelectedUserStats] = useState<{ totalSpent: number, totalPending: number, totalRejected: number, totalCount: number } | null>(null);
@@ -695,12 +618,19 @@ export default function App() {
     description: ''
   });
 
+  const [loginForm, setLoginForm] = useState({
+    email: '',
+    password: '',
+    error: '',
+    isLoading: false
+  });
+
   // Fetch data from API
   const fetchData = async () => {
     if (!user) return;
     setIsLoading(true);
     try {
-      const queryParams = user.role === 'Employee' ? `?employeeId=${user.id}` : '';
+      const queryParams = user.role === 'Employee' ? `?employeeId=${user.id}` : (user.role === 'Manager' ? `?managerId=${user.id}` : `?companyId=${user.companyId}`);
       const statsParams = user.role === 'Employee' ? `?employeeId=${user.id}` : (user.role === 'Manager' ? `?managerId=${user.id}` : `?companyId=${user.companyId}`);
       
       const [expRes, userRes, compRes, statsRes, teamRes] = await Promise.all([
@@ -802,19 +732,56 @@ export default function App() {
     if (view === 'Dashboard') {
       fetchData();
     }
+    if (view === 'Signup' && countries.length === 0) {
+      fetch('https://restcountries.com/v3.1/all?fields=name,currencies')
+        .then(res => res.json())
+        .then(data => {
+          const list = data.map((c: any) => ({
+            name: c.name.common,
+            currency: c.currencies ? Object.keys(c.currencies)[0] : 'USD'
+          })).sort((a: any, b: any) => a.name.localeCompare(b.name));
+          setCountries(list);
+        });
+    }
   }, [view, user]);
 
   // Mock Login
-  const handleLogin = (role: Role) => {
-    // In a real app, this would be an API call
-    const mockUser = MOCK_USERS.find(u => u.role === role) || MOCK_USERS[2];
-    setUser(mockUser);
-    setView('Dashboard');
-    setActiveTab('Overview');
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginForm(prev => ({ ...prev, isLoading: true, error: '' }));
+    
+    try {
+      const res = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: loginForm.email,
+          password: loginForm.password
+        }),
+      });
+      
+      const data = await res.json();
+      
+      if (res.ok) {
+        setUser(data);
+        setView('Dashboard');
+        setActiveTab('Overview');
+      } else {
+        setLoginForm(prev => ({ ...prev, error: data.error || 'Invalid credentials' }));
+      }
+    } catch (error) {
+      setLoginForm(prev => ({ ...prev, error: 'Connection failed. Please try again.' }));
+    } finally {
+      setLoginForm(prev => ({ ...prev, isLoading: false }));
+    }
   };
 
   const handleLogout = () => {
     setUser(null);
+    setExpenses([]);
+    setUsers([]);
+    setTeam([]);
+    setCompany(null);
     setView('Auth');
   };
 
@@ -831,7 +798,6 @@ export default function App() {
       });
       if (res.ok) {
         const result = await res.json();
-        // Auto login
         const newUser: User = {
           id: result.adminId,
           name: data.adminName as string,
@@ -841,10 +807,15 @@ export default function App() {
         };
         setUser(newUser);
         setView('Dashboard');
-        setActiveTab('Overview');
+        setActiveTab('Employees'); // Take directly to team setup
+        setShowAddUserModal(true); // Open "Add User" modal automatically
+      } else {
+        const errorData = await res.json();
+        alert(`Registration failed: ${errorData.error || 'Server error'}`);
       }
     } catch (error) {
       console.error("Signup failed:", error);
+      alert("Registration failed. Please Check if your backend server is running on port 3000.");
     }
   };
 
@@ -867,6 +838,11 @@ export default function App() {
         fetchData();
         (e.target as HTMLFormElement).reset();
         setSelectedRuleIdForNewUser('');
+        setShowAddUserModal(false);
+        alert("Member created and welcome email sent in background!");
+      } else {
+        const errorData = await res.json();
+        alert(`Failed to create member: ${errorData.error || 'Server error'}`);
       }
     } catch (error) {
       console.error("Failed to create user:", error);
@@ -953,7 +929,6 @@ export default function App() {
       employeeId: user.id,
       amount: parseFloat(submitForm.amount),
       currency: submitForm.currency,
-      baseAmount: parseFloat(submitForm.amount), // In a real app, use an exchange rate API
       category: submitForm.category,
       description: submitForm.description,
       date: submitForm.date,
@@ -1005,47 +980,139 @@ export default function App() {
 
   if (view === 'Auth') {
     return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4 font-sans">
+      <div className="min-h-screen relative bg-gradient-to-br from-blue-100 via-white to-blue-50 flex items-center justify-center p-4 font-sans overflow-hidden">
+        {/* Soft Background Orbs */}
+        <div className="absolute top-[10%] left-[15%] w-[30%] h-[30%] bg-blue-200/40 blur-[100px] rounded-full animate-pulse" />
+        <div className="absolute bottom-[20%] right-[10%] w-[30%] h-[30%] bg-blue-300/40 blur-[100px] rounded-full animate-pulse" />
+
         <motion.div 
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="max-w-md w-full"
+          initial={{ opacity: 0, scale: 0.95 }}
+          animate={{ opacity: 1, scale: 1 }}
+          transition={{ duration: 0.6, ease: "easeOut" }}
+          className="max-w-md w-full relative z-10"
         >
-          <div className="text-center mb-8">
-            <div className="inline-flex items-center justify-center w-16 h-16 bg-indigo-600 rounded-2xl shadow-xl mb-4">
-              <Receipt className="text-white" size={32} />
-            </div>
-            <h1 className="text-3xl font-bold text-slate-900">ReimbursePro</h1>
-            <p className="text-slate-500 mt-2">Smart expense management for modern teams</p>
+          <div className="text-center mb-10">
+            <motion.div 
+              initial={{ y: -20, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              transition={{ delay: 0.2 }}
+              className="inline-flex items-center justify-center w-24 h-24 bg-white/70 backdrop-blur-xl rounded-[2.5rem] shadow-2xl shadow-blue-200 border border-white mb-6 group cursor-default"
+            >
+              <Receipt className="text-blue-600 group-hover:scale-110 transition-transform" size={48} />
+            </motion.div>
+            <motion.h1 
+              initial={{ y: -10, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              transition={{ delay: 0.3 }}
+              className="text-4xl font-black text-slate-800 tracking-tight"
+            >
+              ExpenseFlow
+            </motion.h1>
+            <motion.p 
+              initial={{ y: -5, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              transition={{ delay: 0.4 }}
+              className="text-slate-500 mt-3 font-semibold tracking-wide uppercase text-xs"
+            >
+              Smart ExpenseFlow
+            </motion.p>
           </div>
 
-          <Card className="p-8">
-            <h2 className="text-xl font-semibold mb-6 text-center">Select Prototype Role</h2>
-            <div className="space-y-3">
-              {(['Admin', 'Manager', 'Employee'] as Role[]).map((role) => (
-                <button
-                  key={role}
-                  onClick={() => handleLogin(role)}
-                  className="w-full flex items-center justify-between p-4 rounded-xl border border-slate-200 hover:border-indigo-600 hover:bg-indigo-50 transition-all group"
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center group-hover:bg-indigo-100">
-                      {role === 'Admin' ? <Settings size={20} /> : role === 'Manager' ? <Users size={20} /> : <FileText size={20} />}
-                    </div>
-                    <div className="text-left">
-                      <p className="font-semibold text-slate-900">{role}</p>
-                      <p className="text-xs text-slate-500">Access {role.toLowerCase()} features</p>
-                    </div>
-                  </div>
-                  <ChevronRight className="text-slate-400 group-hover:text-indigo-600" size={20} />
-                </button>
-              ))}
-            </div>
+          <Card className="p-10 bg-white/60 backdrop-blur-3xl border-white shadow-[0_32px_80px_-16px_rgba(0,0,0,0.08)] rounded-[3rem]">
+            <h2 className="text-2xl font-bold text-slate-800 mb-8 text-center italic font-serif">Hello there.</h2>
+            
+            <form onSubmit={handleLogin} className="space-y-6">
+              <div className="space-y-2">
+                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-2">Email Address</label>
+                <div className="relative group">
+                  <Globe className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-blue-600 transition-colors" size={18} />
+                  <input 
+                    type="email" 
+                    required 
+                    value={loginForm.email}
+                    onChange={(e) => setLoginForm(prev => ({ ...prev, email: e.target.value, error: '' }))}
+                    className="w-full pl-14 pr-4 py-4.5 bg-white/40 border border-white rounded-2xl text-slate-700 font-medium focus:ring-2 focus:ring-blue-200 outline-none transition-all placeholder:text-slate-400 shadow-sm"
+                    placeholder="you@company.com"
+                  />
+                </div>
+              </div>
 
-            <div className="mt-8 pt-6 border-t border-slate-100">
-              <p className="text-center text-sm text-slate-500">
-                New company? <button onClick={() => setView('Signup')} className="text-indigo-600 font-semibold hover:underline">Create an account</button>
+              <div className="space-y-2">
+                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-2">Secure Code</label>
+                <div className="relative group">
+                  <ShieldCheck className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-blue-600 transition-colors" size={18} />
+                  <input 
+                    type="password" 
+                    required 
+                    value={loginForm.password}
+                    onChange={(e) => setLoginForm(prev => ({ ...prev, password: e.target.value, error: '' }))}
+                    className="w-full pl-14 pr-4 py-4.5 bg-white/40 border border-white rounded-2xl text-slate-700 font-medium focus:ring-2 focus:ring-blue-200 outline-none transition-all placeholder:text-slate-400 shadow-sm"
+                    placeholder="••••••••"
+                  />
+                </div>
+              </div>
+
+              <AnimatePresence>
+                {loginForm.error && (
+                  <motion.div 
+                    initial={{ opacity: 0, y: -10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, scale: 0.95 }}
+                    className="flex items-center gap-2 p-4 bg-blue-500/10 border border-blue-500/20 rounded-2xl text-blue-600 text-[11px] font-bold"
+                  >
+                    <AlertCircle size={14} />
+                    {loginForm.error}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              <button 
+                type="submit" 
+                disabled={loginForm.isLoading}
+                className="w-full py-4.5 bg-blue-600 border border-blue-500 text-white rounded-2xl font-bold text-sm uppercase tracking-widest shadow-2xl shadow-blue-200 transition-all disabled:opacity-50 hover:bg-blue-700 hover:border-blue-600 hover:shadow-blue-200 active:scale-95 flex items-center justify-center gap-3"
+              >
+                {loginForm.isLoading ? (
+                  <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                ) : (
+                  <>
+                    <span>Enter Portal</span>
+                    <ArrowRight size={18} />
+                  </>
+                )}
+              </button>
+            </form>
+
+            <div className="mt-10 pt-8 border-t border-slate-100 text-center space-y-6">
+              <p className="text-sm text-slate-400 font-medium">
+                New to ExpenseFlow? <button onClick={() => setView('Signup')} className="text-blue-600 font-bold hover:text-blue-700 transition-colors">Get Started</button>
               </p>
+              
+              <div className="pt-4 flex flex-col items-center gap-4">
+                <span className="text-[9px] font-bold text-slate-300 uppercase tracking-[0.3em]">Identity Shortcuts</span>
+                <div className="flex flex-wrap justify-center gap-2">
+                  <button 
+                    onClick={() => setLoginForm(prev => ({ ...prev, email: 'alice@acme.com', password: 'pass123' }))}
+                    className="px-4 py-2 bg-white/70 hover:bg-white border border-white/50 rounded-full text-[10px] font-bold text-slate-500 transition-all shadow-sm flex items-center gap-2"
+                  >
+                    <div className="w-1.5 h-1.5 rounded-full bg-blue-500" />
+                    Alice
+                  </button>
+                  <button 
+                    onClick={() => setLoginForm(prev => ({ ...prev, email: 'bob@acme.com', password: 'pass123' }))}
+                    className="px-4 py-2 bg-white/70 hover:bg-white border border-white/50 rounded-full text-[10px] font-bold text-slate-500 transition-all shadow-sm flex items-center gap-2"
+                  >
+                    <div className="w-1.5 h-1.5 rounded-full bg-blue-500" />
+                    Bob
+                  </button>
+                  <button 
+                    onClick={() => setLoginForm(prev => ({ ...prev, email: 'charlie@acme.com', password: 'pass123' }))}
+                    className="px-4 py-2 bg-white/70 hover:bg-white border border-white/50 rounded-full text-[10px] font-bold text-slate-500 transition-all shadow-sm flex items-center gap-2"
+                  >
+                    <div className="w-1.5 h-1.5 rounded-full bg-blue-500" />
+                    Charlie
+                  </button>
+                </div>
+              </div>
             </div>
           </Card>
         </motion.div>
@@ -1080,21 +1147,32 @@ export default function App() {
                   </div>
                   <div>
                     <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">Country</label>
-                    <select name="country" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all">
-                      <option value="United States">United States</option>
-                      <option value="United Kingdom">United Kingdom</option>
-                      <option value="India">India</option>
-                      <option value="Germany">Germany</option>
+                    <select 
+                      name="country" 
+                      required
+                      value={selectedCountry}
+                      onChange={(e) => {
+                        const country = e.target.value;
+                        setSelectedCountry(country);
+                        const found = countries.find(c => c.name === country);
+                        if (found) setSelectedCurrency(found.currency);
+                      }}
+                      className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+                    >
+                      <option value="">Select Country</option>
+                      {countries.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
                     </select>
                   </div>
                   <div>
                     <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">Default Currency</label>
-                    <select name="defaultCurrency" className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all">
-                      <option value="USD">USD ($)</option>
-                      <option value="EUR">EUR (€)</option>
-                      <option value="GBP">GBP (£)</option>
-                      <option value="INR">INR (₹)</option>
-                    </select>
+                    <input 
+                      name="defaultCurrency" 
+                      readOnly
+                      value={selectedCurrency}
+                      className="w-full px-4 py-2.5 bg-slate-100 border border-slate-200 rounded-xl outline-none" 
+                      placeholder="Automatic" 
+                    />
+                    <p className="text-[10px] text-slate-400 mt-1">Detected automatically based on country</p>
                   </div>
                 </div>
 
@@ -1168,12 +1246,12 @@ export default function App() {
                 onClick={() => setActiveTab('Users')} 
               />
             )}
-            {(user?.role === 'Manager' || user?.role === 'Admin') && (
-              <SidebarItem 
-                icon={CheckCircle2} 
-                label={isSidebarOpen ? "Approvals" : ""} 
-                active={activeTab === 'Approvals'} 
-                onClick={() => setActiveTab('Approvals')} 
+            {user?.role === 'Manager' && (
+              <SidebarItem
+                icon={CheckCircle2}
+                label={isSidebarOpen ? "Approvals" : ""}
+                active={activeTab === 'Approvals'}
+                onClick={() => setActiveTab('Approvals')}
               />
             )}
             {user?.role === 'Admin' && (
@@ -1237,7 +1315,12 @@ export default function App() {
             >
               {isSidebarOpen ? <Menu size={20} /> : <ChevronRight size={20} />}
             </button>
-            <h2 className="text-xl font-bold text-slate-900">{activeTab}</h2>
+            <div>
+              <h2 className="text-xl font-bold text-slate-900">{activeTab}</h2>
+              <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">
+                <span className="text-indigo-600">{user?.name}</span> • Org: <span className="text-indigo-600">{user?.companyId}</span>
+              </p>
+            </div>
           </div>
 
           <div className="flex items-center gap-4">
@@ -1575,8 +1658,8 @@ export default function App() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
-                        {expenses.filter(e => e.status === 'Pending').length > 0 ? (
-                          expenses.filter(e => e.status === 'Pending').map((exp) => (
+                        {expenses.filter(e => e.status === 'Pending' && e.approvals.some(a => a.role === user?.role && a.status === 'Pending')).length > 0 ? (
+                          expenses.filter(e => e.status === 'Pending' && e.approvals.some(a => a.role === user?.role && a.status === 'Pending')).map((exp) => (
                             <tr key={exp.id} className="hover:bg-slate-50/50 transition-colors">
                               <td className="px-6 py-4">
                                 <div className="flex items-center gap-3">
@@ -1588,7 +1671,8 @@ export default function App() {
                               </td>
                               <td className="px-6 py-4">
                                 <p className="text-sm font-bold text-slate-900">{exp.category}</p>
-                                <p className="text-xs text-slate-500 line-clamp-1">{exp.description}</p>
+                                <p className="text-xs text-slate-500 line-clamp-1 italic">"{exp.description}"</p>
+                                <p className="text-[8px] text-indigo-400 mt-1 font-mono uppercase">DB ID: {exp.id} • App Context Org: {user?.companyId}</p>
                               </td>
                               <td className="px-6 py-4 text-sm text-slate-600">{exp.date}</td>
                               <td className="px-6 py-4">
@@ -1934,18 +2018,21 @@ export default function App() {
                   <Card className="p-8">
                     <h3 className="text-xl font-bold text-slate-900 mb-6">Company Profile</h3>
                     <form onSubmit={handleUpdateCompanyProfile} className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                      <div>
-                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">Base Currency</label>
-                        <select name="defaultCurrency" defaultValue={company?.defaultCurrency} className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all">
-                          <option value="USD">USD ($)</option>
-                          <option value="EUR">EUR (€)</option>
-                          <option value="GBP">GBP (£)</option>
-                          <option value="INR">INR (₹)</option>
-                        </select>
-                      </div>
-                      <div>
-                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5">Country</label>
-                        <input name="country" defaultValue={company?.country} className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all" />
+                      <div className="md:col-span-2 p-6 bg-slate-50 border border-slate-200 rounded-3xl">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-3">
+                            <div className="w-12 h-12 rounded-2xl bg-indigo-600 text-white flex items-center justify-center font-bold text-xl shadow-lg shadow-indigo-100">
+                              {company?.name.charAt(0)}
+                            </div>
+                            <div>
+                              <p className="text-xl font-bold text-slate-900">{company?.name}</p>
+                              <p className="text-sm text-slate-500">{company?.country} • Base Currency: {company?.defaultCurrency}</p>
+                            </div>
+                          </div>
+                          <div className="px-4 py-2 bg-indigo-50 text-indigo-700 rounded-xl text-xs font-bold uppercase tracking-wider">
+                            Verified Organization
+                          </div>
+                        </div>
                       </div>
                       <div className="md:col-span-2 flex justify-end">
                         <button type="submit" className="bg-indigo-600 text-white px-6 py-2 rounded-xl font-bold hover:bg-indigo-700 transition-all">
