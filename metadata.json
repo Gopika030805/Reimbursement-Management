@@ -1,5 +1,5 @@
 {
-  "name": "ReimbursePro",
+  "name": "ExpenseFlow",
   "description": "A comprehensive reimbursement management system with multi-level approval workflows, OCR receipt scanning, and multi-currency support.",
   "requestFramePermissions": ["camera"]
 }
