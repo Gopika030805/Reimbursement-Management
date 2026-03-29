@@ -42,7 +42,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { format, subDays, startOfMonth, endOfMonth, eachDayOfInterval } from 'date-fns';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
-import { GoogleGenAI } from "@google/genai";
+
 import { 
   AreaChart, 
   Area, 
@@ -591,7 +591,7 @@ const Card = ({ children, className, ...props }: { children: React.ReactNode, cl
 
 // --- Main App ---
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
+
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -854,43 +854,42 @@ export default function App() {
   const handleOCR = async (file: File) => {
     setIsScanning(true);
     try {
-      const reader = new FileReader();
-      reader.onloadend = async () => {
-        const base64 = reader.result as string;
-        const prompt = "Extract the following details from this receipt image: total amount (number), currency (3-letter code), date (YYYY-MM-DD), category (one of: Travel, Meals, Office Supplies, Software, Other), and a brief description. Return ONLY a JSON object.";
-        
-        const result = await ai.models.generateContent({
-          model: "gemini-3-flash-preview",
-          contents: {
-            parts: [
-              { text: prompt },
-              {
-                inlineData: {
-                  data: base64.split(",")[1],
-                  mimeType: file.type
-                }
-              }
-            ]
-          }
-        });
+      const base64Data = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const base64 = reader.result as string;
+          resolve(base64.split(",")[1]);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
 
-        const text = result.text;
-        const jsonMatch = text.match(/\{.*\}/s);
-        if (jsonMatch) {
-          const data = JSON.parse(jsonMatch[0]);
-          setSubmitForm(prev => ({
-            ...prev,
-            amount: data.amount?.toString() || prev.amount,
-            currency: data.currency || prev.currency,
-            category: data.category || prev.category,
-            date: data.date || prev.date,
-            description: data.description || prev.description
-          }));
-        }
-      };
-      reader.readAsDataURL(file);
-    } catch (error) {
+      const response = await fetch('/api/ocr', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          base64Image: base64Data,
+          mimeType: file.type,
+          fileName: file.name
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`OCR request failed: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      setSubmitForm(prev => ({
+        ...prev,
+        amount: data.amount?.toString() || prev.amount,
+        currency: data.currency || prev.currency,
+        category: data.category || prev.category,
+        date: data.date || prev.date,
+        description: data.description || prev.description
+      }));
+    } catch (error: any) {
       console.error("OCR failed:", error);
+      alert(`OCR Failed: ${error.message || "Unknown error"}. Please make sure your server is running and your image is within size limits (free tier is usually < 1MB).`);
     } finally {
       setIsScanning(false);
     }
@@ -1339,16 +1338,15 @@ export default function App() {
                     </div>
                   </div>
                 ) : (
-                  /* Manager/Admin Dashboard: Vertical Stats -> My Expenses -> My Team (if Manager) */
-                  <div className="grid grid-cols-1 xl:grid-cols-12 gap-8">
-                    <div className="xl:col-span-4 space-y-6">
-                      <h3 className="text-lg font-bold text-slate-900">Dashboard Summary</h3>
+                  /* Manager/Admin Dashboard: Horizontal Stats -> Graph -> My Expenses -> Role-specific sections */
+                  <div className="space-y-8">
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                       <Card className="p-6 bg-indigo-600 text-white border-none shadow-indigo-200 shadow-xl">
                         <p className="text-indigo-100 text-sm font-medium">Total Spent</p>
                         <h3 className="text-3xl font-bold mt-1">{company?.defaultCurrency} {stats.totalSpent?.toLocaleString() || '0'}</h3>
                         <p className="text-xs text-indigo-100 mt-2">Across {stats.totalCount} claims</p>
                       </Card>
-                      <Card className="p-5 border-l-4 border-l-amber-500">
+                      <Card className="p-6 border-l-4 border-l-amber-500">
                         <div className="flex items-center gap-4">
                           <div className="p-3 rounded-xl bg-amber-50 text-amber-600">
                             <Clock size={24} />
@@ -1359,7 +1357,7 @@ export default function App() {
                           </div>
                         </div>
                       </Card>
-                      <Card className="p-5 border-l-4 border-l-rose-500">
+                      <Card className="p-6 border-l-4 border-l-rose-500">
                         <div className="flex items-center gap-4">
                           <div className="p-3 rounded-xl bg-rose-50 text-rose-600">
                             <XCircle size={24} />
@@ -1370,96 +1368,99 @@ export default function App() {
                           </div>
                         </div>
                       </Card>
-                      
-                      {user?.role === 'Admin' && (
-                        <Card className="p-6">
-                          <h3 className="font-bold text-lg mb-6">Approval Rules</h3>
-                          <div className="space-y-6">
-                            {rules?.[0]?.steps?.map((step, i) => (
-                              <div key={i} className="relative pl-8 pb-6 last:pb-0">
-                                {i !== (rules[0].steps.length - 1) && (
-                                  <div className="absolute left-[11px] top-6 bottom-0 w-0.5 bg-slate-100" />
-                                )}
-                                <div className="absolute left-0 top-1 w-6 h-6 rounded-full bg-indigo-600 text-white flex items-center justify-center text-xs font-bold">
-                                  {i + 1}
+                    </div>
+
+                    <Card className="p-6">
+                      <h3 className="text-lg font-bold text-slate-900 mb-4">Spending Trends</h3>
+                      <DashboardGraph data={expenses} />
+                    </Card>
+
+                    <div className="space-y-6">
+                      <div className="flex items-center justify-between">
+                        <h3 className="text-lg font-bold text-slate-900">My Expenses</h3>
+                        <button onClick={() => setActiveTab('Expenses')} className="text-sm text-indigo-600 font-semibold hover:underline">View All</button>
+                      </div>
+                      <Card className="p-0">
+                        <div className="divide-y divide-slate-100">
+                          {expenses.length > 0 ? expenses.slice(0, 8).map((exp) => (
+                            <div key={exp.id} className="flex items-center justify-between p-4 hover:bg-slate-50 transition-colors">
+                              <div className="flex items-center gap-4">
+                                <div className="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center text-slate-600">
+                                  <Receipt size={20} />
                                 </div>
                                 <div>
-                                  <p className="font-bold text-slate-900">{step.role}</p>
-                                  <p className="text-xs text-slate-500 mt-1">
-                                    {step.isManagerApprover ? "Direct Manager" : "Departmental Head"}
-                                  </p>
+                                  <p className="font-bold text-slate-900 text-sm">{exp.description}</p>
+                                  <p className="text-xs text-slate-500">{exp.category} • {exp.date}</p>
                                 </div>
                               </div>
-                            ))}
-                            {(!rules || rules.length === 0 || !rules[0].steps) && (
-                              <p className="text-sm text-slate-500 italic">No approval rules configured.</p>
-                            )}
-                          </div>
-                        </Card>
-                      )}
-                    </div>
-
-                    <div className="xl:col-span-8 space-y-8">
-                      <div className="space-y-6">
-                        <div className="flex items-center justify-between">
-                          <h3 className="text-lg font-bold text-slate-900">My Expenses</h3>
-                          <button onClick={() => setActiveTab('Expenses')} className="text-sm text-indigo-600 font-semibold hover:underline">View All</button>
-                        </div>
-                        <Card className="p-0">
-                          <div className="divide-y divide-slate-100">
-                            {expenses.length > 0 ? expenses.slice(0, 5).map((exp) => (
-                              <div key={exp.id} className="flex items-center justify-between p-4 hover:bg-slate-50 transition-colors">
-                                <div className="flex items-center gap-4">
-                                  <div className="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center text-slate-600">
-                                    <Receipt size={20} />
-                                  </div>
-                                  <div>
-                                    <p className="font-bold text-slate-900 text-sm">{exp.description}</p>
-                                    <p className="text-xs text-slate-500">{exp.category} • {exp.date}</p>
-                                  </div>
-                                </div>
-                                <div className="text-right">
-                                  <p className="font-bold text-slate-900 text-sm">{exp.currency} {(exp.amount || 0).toFixed(2)}</p>
-                                  <Badge status={exp.status} />
-                                </div>
+                              <div className="text-right">
+                                <p className="font-bold text-slate-900 text-sm">{exp.currency} {(exp.amount || 0).toFixed(2)}</p>
+                                <Badge status={exp.status} />
                               </div>
-                            )) : (
-                              <div className="p-12 text-center">
-                                <Receipt className="text-slate-300 mx-auto mb-4" size={48} />
-                                <p className="text-slate-500 font-medium">No expenses found</p>
-                              </div>
-                            )}
-                          </div>
-                        </Card>
-                      </div>
-
-                      {user?.role === 'Manager' && team.length > 0 && (
-                        <div className="space-y-6">
-                          <h3 className="text-lg font-bold text-slate-900">My Team</h3>
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            {team.slice(0, 6).map(member => (
-                              <Card key={member.id} className="p-4 flex items-center gap-4 hover:border-indigo-300 transition-all cursor-pointer" onClick={() => {
-                                setSelectedUser(member);
-                                setActiveTab('Users');
-                                fetchUserDetails(member.id);
-                              }}>
-                                <div className="w-12 h-12 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-700 font-bold">
-                                  {member.name.charAt(0)}
-                                </div>
-                                <div className="flex-1 min-w-0">
-                                  <p className="font-bold text-slate-900 truncate">{member.name}</p>
-                                  <p className="text-xs text-slate-500 truncate">{member.department || 'No Department'}</p>
-                                </div>
-                                <ChevronRight size={18} className="text-slate-300" />
-                              </Card>
-                            ))}
-                          </div>
-                          {team.length > 6 && (
-                            <button onClick={() => setActiveTab('Users')} className="text-indigo-600 font-bold text-sm hover:underline">View all {team.length} members</button>
+                            </div>
+                          )) : (
+                            <div className="p-12 text-center">
+                              <Receipt className="text-slate-300 mx-auto mb-4" size={48} />
+                              <p className="text-slate-500 font-medium">No expenses found</p>
+                            </div>
                           )}
                         </div>
-                      )}
+                      </Card>
                     </div>
+
+                    {user?.role === 'Manager' && team.length > 0 && (
+                      <div className="space-y-6">
+                        <h3 className="text-lg font-bold text-slate-900">My Team</h3>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          {team.slice(0, 6).map(member => (
+                            <Card key={member.id} className="p-4 flex items-center gap-4 hover:border-indigo-300 transition-all cursor-pointer" onClick={() => {
+                              setSelectedUser(member);
+                              setActiveTab('Users');
+                              fetchUserDetails(member.id);
+                            }}>
+                              <div className="w-12 h-12 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-700 font-bold">
+                                {member.name.charAt(0)}
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="font-bold text-slate-900 truncate">{member.name}</p>
+                                <p className="text-xs text-slate-500 truncate">{member.department || 'No Department'}</p>
+                              </div>
+                              <ChevronRight size={18} className="text-slate-300" />
+                            </Card>
+                          ))}
+                        </div>
+                        {team.length > 6 && (
+                          <button onClick={() => setActiveTab('Users')} className="text-indigo-600 font-bold text-sm hover:underline">View all {team.length} members</button>
+                        )}
+                      </div>
+                    )}
+
+                    {user?.role === 'Admin' && (
+                      <Card className="p-6">
+                        <h3 className="font-bold text-lg mb-6">Approval Rules</h3>
+                        <div className="space-y-6">
+                          {rules?.[0]?.steps?.map((step, i) => (
+                            <div key={i} className="relative pl-8 pb-6 last:pb-0">
+                              {i !== (rules[0].steps.length - 1) && (
+                                <div className="absolute left-[11px] top-6 bottom-0 w-0.5 bg-slate-100" />
+                              )}
+                              <div className="absolute left-0 top-1 w-6 h-6 rounded-full bg-indigo-600 text-white flex items-center justify-center text-xs font-bold">
+                                {i + 1}
+                              </div>
+                              <div>
+                                <p className="font-bold text-slate-900">{step.role}</p>
+                                <p className="text-xs text-slate-500 mt-1">
+                                  {step.isManagerApprover ? "Direct Manager" : "Departmental Head"}
+                                </p>
+                              </div>
+                            </div>
+                          ))}
+                          {(!rules || rules.length === 0 || !rules[0].steps) && (
+                            <p className="text-sm text-slate-500 italic">No approval rules configured.</p>
+                          )}
+                        </div>
+                      </Card>
+                    )}
                   </div>
                 )}
               </motion.div>
@@ -2316,10 +2317,10 @@ export default function App() {
                       <div className="p-4 bg-indigo-50 rounded-xl border border-indigo-100">
                         <div className="flex items-center gap-3 text-indigo-700 mb-2">
                           <Scan size={18} />
-                          <span className="font-bold text-sm">AI Smart Scan</span>
+                          <span className="font-bold text-sm">OCR Smart Scan</span>
                         </div>
                         <p className="text-xs text-indigo-600 leading-relaxed">
-                          Upload a receipt and our AI will automatically extract the amount, date, and category for you.
+                          Upload a receipt and our OCR system will automatically extract the amount, date, and merchant for you.
                         </p>
                       </div>
                       {isScanning && (
@@ -2334,7 +2335,7 @@ export default function App() {
                           >
                             <Clock size={18} />
                           </motion.div>
-                          <span className="font-bold text-sm">Gemini is analyzing your receipt...</span>
+                          <span className="font-bold text-sm">OCR Space is analyzing your receipt...</span>
                         </motion.div>
                       )}
                     </div>
