@@ -1,16 +1,4 @@
-<div align="center">
-  <img src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" width="1200" alt="ExpenseFlow Banner">
-  
-  # 💸 ExpenseFlow
-  ### Smart Reimbursement Management for Modern Teams
-  
-  [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-  [![Vite](https://img.shields.io/badge/Vite-6.0-646CFF?logo=vite)](https://vitejs.dev/)
-  [![React](https://img.shields.io/badge/React-19.0-61DAFB?logo=react)](https://react.dev/)
-  [![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-4.0-38B2AC?logo=tailwind-css)](https://tailwindcss.com/)
-</div>
 
----
 
 ## 🌟 Overview
 
